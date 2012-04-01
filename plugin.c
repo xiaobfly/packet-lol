@@ -3,7 +3,7 @@
  *
  * It is created automatically by Makefile or Makefile.nmake.
  */
-
+#include "define.h"
 #ifdef HAVE_CONFIG_H
 # include "config.h"
 #endif
