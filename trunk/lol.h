@@ -1,11 +1,13 @@
-#include "blowfish.h"
-#include "cdecode.h"
-
 #define LOL_PORT_MIN 5000
 #define LOL_PORT_MAX 5500
 #define LOL_EXE "League of Legends.exe"
 #define SLEEP_TIMEOUT 50
+#define CRC_VER CRC16
 
+#include "blowfish.h"
+#include "cdecode.h"
+#include "crc.h"
+#include <enet\enet.h>
 
 /* forward reference */
 void proto_register_lol();

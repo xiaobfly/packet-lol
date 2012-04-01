@@ -29,6 +29,7 @@
  * 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
  
+#include "define.h"
 #ifdef HAVE_CONFIG_H
 # include "config.h"
 #endif
@@ -53,6 +54,10 @@
 
 #include "lol.h"
 
+/* Special CRC */
+static guint16 crcsum(guint16 crc, const guint8* message, guint length);
+
+static gboolean haveCrc = FALSE;
 static gboolean initialized = FALSE;
 
 /* Listener system */
@@ -325,7 +330,7 @@ void save_key(tvbuff_t *tvb)
 	dummy = make_dummy_key(gPREF_KEY);
 	
 	ret = sendto(sock, (char*)&dummy, dummy.size, 0, (struct sockaddr *)&address, sizeof(address));
-	sprintf(buf, "Packet(%i), port %i(%x), addr %s(%X), dummy length: %i", ret, address.sin_port, tvb_get_ntohs(tvb, 34), inet_ntoa(address.sin_addr), tvb_get_guint8(tvb, 26), dummy.size);
+	sprintf_s(buf, 255, "Packet(%i), port %i(%x), addr %s(%X), dummy length: %i", ret, address.sin_port, tvb_get_ntohs(tvb, 34), inet_ntoa(address.sin_addr), tvb_get_guint8(tvb, 26), dummy.size);
 	
 	
 	OutputDebugString(buf);
@@ -370,7 +375,7 @@ HANDLE getHandleByName(char *name)
 	{
 		while (Process32Next(snapshot, &entry) == TRUE)
 		{
-			if (stricmp(entry.szExeFile, name) == 0)
+			if (_stricmp(entry.szExeFile, name) == 0)
 			{  
 				hProcess = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, FALSE, entry.th32ProcessID);
 			}
@@ -444,7 +449,17 @@ void proto_reg_handoff_lol(void)
   //} flags;
 static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 {
-
+	//Enet
+	ENetPacket *packet;
+	const unsigned char *enetData = NULL;
+	ENetProtocolHeader * header;
+	ENetProtocol * command;
+	//ENetPeer * peer;
+	//enet_uint8 * currentData;
+	size_t headerSize;
+	enet_uint16 peerID, flags;
+	enet_uint8 sessionID;
+	guint16 checksum;
 	char *p = NULL;
 	gint offset = 0;
 	guint8 packet_tracking = tvb_get_guint8(tvb, 4);
@@ -452,7 +467,7 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 	col_set_str(pinfo->cinfo, COL_PROTOCOL, "LoL GC");
 	/* Clear out stuff in the info column */
 	col_clear(pinfo->cinfo,COL_INFO);
-	
+
 	//pinfo->fd->flags.visited
 	//pinfo->fd->pfd->
 	//p = (char*)pinfo->fd->pfd->data;
@@ -478,16 +493,83 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 			proto_tree_add_item(lol_tree, hf_lol_unique, tvb, offset, 2, FALSE); offset += 2;
 		}
 		
+		enetData = tvb_get_ptr(tvb, 0, tvb_length(tvb));
+		header = (ENetProtocolHeader *)enetData;
+		peerID = ENET_NET_TO_HOST_16 (header -> peerID);
+		sessionID = (peerID & ENET_PROTOCOL_HEADER_SESSION_MASK) >> ENET_PROTOCOL_HEADER_SESSION_SHIFT;
+		flags = peerID & ENET_PROTOCOL_HEADER_FLAG_MASK;
+		peerID &= ~ (ENET_PROTOCOL_HEADER_FLAG_MASK | ENET_PROTOCOL_HEADER_SESSION_MASK);
+
+		headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeader) : (size_t) & ((ENetProtocolHeader *) 0) -> sentTime);
+		headerSize += sizeof (enet_uint32); //As LoL using checksum (and i think there checksum is always returning zero...)
+
+		if (flags & ENET_PROTOCOL_HEADER_FLAG_COMPRESSED)
+		{
+			col_append_str(pinfo->cinfo, COL_INFO, "COMPRESSED, ");
+		}
+
+		command = (ENetProtocol *)( enetData+headerSize);
+		switch (command->header.command & ENET_PROTOCOL_COMMAND_MASK)
+		{
+			case ENET_PROTOCOL_COMMAND_ACKNOWLEDGE:
+				col_append_str(pinfo->cinfo, COL_INFO, "Ack, ");
+				break;
+			case ENET_PROTOCOL_COMMAND_CONNECT:
+				col_append_str(pinfo->cinfo, COL_INFO, "Connect, ");
+				break;
+			case ENET_PROTOCOL_COMMAND_VERIFY_CONNECT:
+				col_append_str(pinfo->cinfo, COL_INFO, "Check Connect, ");
+				break;
+			case ENET_PROTOCOL_COMMAND_DISCONNECT:
+				col_append_str(pinfo->cinfo, COL_INFO, "Disconnect, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_PING:
+				col_append_str(pinfo->cinfo, COL_INFO, "Ping, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_SEND_RELIABLE:
+				col_append_str(pinfo->cinfo, COL_INFO, "Send reliable, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE:
+				col_append_str(pinfo->cinfo, COL_INFO, "Send unreliable, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_SEND_UNSEQUENCED:
+				col_append_str(pinfo->cinfo, COL_INFO, "Send unsequenced, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_SEND_FRAGMENT:
+				col_append_str(pinfo->cinfo, COL_INFO, "Send fragment, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_BANDWIDTH_LIMIT:
+				col_append_str(pinfo->cinfo, COL_INFO, "Bandwidth limit, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_THROTTLE_CONFIGURE:
+				col_append_str(pinfo->cinfo, COL_INFO, "Throttle configure, ");
+				break;
+
+			case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE_FRAGMENT:
+				col_append_str(pinfo->cinfo, COL_INFO, "Unreliable fragment, ");
+				break;
+			default:
+				col_append_str(pinfo->cinfo, COL_INFO, "Unknown, ");
+		}
+
+		/*
 		if(packet_tracking == 0xFF && packet_function == 0xFF)
 		{
-			col_add_fstr(pinfo->cinfo, COL_INFO, "Connection request");
+			col_append_str(pinfo->cinfo, COL_INFO, "Connection request");
 			proto_tree_add_item(lol_tree, hf_lol_data, tvb, offset, -1, FALSE);
 			save_key(tvb);
 		}				
 		else
 		{
 			gint length = (gint)tvb_length(tvb);
-			/* Read all packets */
+			/* Read all packets *
 			while(offset < length)
 			{
 				guint8 packet_type = tvb_get_guint8(tvb, offset);
@@ -522,6 +604,17 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 						{
 							case 0x00:
 								col_append_str(pinfo->cinfo, COL_INFO, "KeyCheck, ");
+								if(haveCrc == FALSE)
+								{
+									checksum = crcsum(0, tvb_get_ptr(tvb, 0, tvb_length(tvb)), tvb_length(tvb));
+
+									p = (char*)g_malloc(255);
+									sprintf_s(p, 255, "CRC: %i, (lenght: %i)", checksum, tvb_length(tvb));
+									col_append_str(pinfo->cinfo, COL_INFO, p);
+									OutputDebugString(p);
+									g_free(p);
+									haveCrc = TRUE;
+								}
 							break;
 							case 0x05:
 								col_append_str(pinfo->cinfo, COL_INFO, "Chat, ");
@@ -529,12 +622,12 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 						}
 				}
 				
-				/* Packet subtree header */
-				/* TODO: Numbering */
+				/* Packet subtree header *
+				/* TODO: Numbering *
 				lol_header_item = proto_tree_add_item(lol_tree, hf_lol_packet, tvb, offset, header_length+data_length+2, FALSE);
 				lol_header_tree = proto_item_add_subtree(lol_header_item, ett_lol);
 				
-				/* Packet header structure building */
+				/* Packet header structure building *
 				proto_tree_add_item(lol_header_tree, hf_lol_type, tvb, offset, 1, FALSE); offset += 1;
 				proto_tree_add_item(lol_header_tree, hf_lol_class, tvb, offset, 1, FALSE); offset += 1;
 					
@@ -569,7 +662,7 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 							{
 							int i = 0;
 							BLOWFISH_context c;					
-							guint16 enc_length;*/
+							guint16 enc_length;*
 							
 							data_length = (guint16)tvb_get_ntohs(tvb, offset);
 							proto_tree_add_item(lol_header_tree, hf_lol_segment_size, tvb, offset, 2, FALSE); offset += 4;
@@ -586,13 +679,13 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 								i+=8;
 							}*/
 							
-							/* The real data */
+							/* The real data *
 							proto_tree_add_item(lol_header_tree, hf_lol_data, tvb, offset, data_length, FALSE); offset += data_length;
 							//}
 						}
 						else
 						{
-						/*
+						
 							if(isKey)
 							{
 							
@@ -615,20 +708,73 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 						
 							new_tvb = tvb_new_real_data(decrypted, enc_length, enc_length);
 							tvb_set_child_real_data_tvbuff(tvb, new_tvb);
+							col_append_str(pinfo->cinfo, COL_INFO, "Decrypted, ");
 							add_new_data_source(pinfo, new_tvb, "Decrypted");
 		
 							proto_tree_add_item(lol_header_tree, hf_lol_data, new_tvb, offset, data_length, FALSE); offset += data_length;
-							}*/
-							proto_tree_add_item(lol_header_tree, hf_lol_data, tvb, offset, data_length, FALSE); offset += data_length;
+							}
+							//proto_tree_add_item(lol_header_tree, hf_lol_data, tvb, offset, data_length, FALSE); offset += data_length;
 						}
 					}
 				}
 			}
-		}
+		}*/
 	}
 }
 
 tvbuff_t *decrypt_lol(tvbuff_t *tvb, guint16 data_length)
 {
 	return NULL;
+}
+
+/* CRC-16 x^16 + x^15 + x^2 + 1
+ * Implementation borrowed from the Linux kernel.
+ */
+static const guint16 crc16_table[256] = {
+  0x0000, 0xC0C1, 0xC181, 0x0140, 0xC301, 0x03C0, 0x0280, 0xC241,
+  0xC601, 0x06C0, 0x0780, 0xC741, 0x0500, 0xC5C1, 0xC481, 0x0440,
+  0xCC01, 0x0CC0, 0x0D80, 0xCD41, 0x0F00, 0xCFC1, 0xCE81, 0x0E40,
+  0x0A00, 0xCAC1, 0xCB81, 0x0B40, 0xC901, 0x09C0, 0x0880, 0xC841,
+  0xD801, 0x18C0, 0x1980, 0xD941, 0x1B00, 0xDBC1, 0xDA81, 0x1A40,
+  0x1E00, 0xDEC1, 0xDF81, 0x1F40, 0xDD01, 0x1DC0, 0x1C80, 0xDC41,
+  0x1400, 0xD4C1, 0xD581, 0x1540, 0xD701, 0x17C0, 0x1680, 0xD641,
+  0xD201, 0x12C0, 0x1380, 0xD341, 0x1100, 0xD1C1, 0xD081, 0x1040,
+  0xF001, 0x30C0, 0x3180, 0xF141, 0x3300, 0xF3C1, 0xF281, 0x3240,
+  0x3600, 0xF6C1, 0xF781, 0x3740, 0xF501, 0x35C0, 0x3480, 0xF441,
+  0x3C00, 0xFCC1, 0xFD81, 0x3D40, 0xFF01, 0x3FC0, 0x3E80, 0xFE41,
+  0xFA01, 0x3AC0, 0x3B80, 0xFB41, 0x3900, 0xF9C1, 0xF881, 0x3840,
+  0x2800, 0xE8C1, 0xE981, 0x2940, 0xEB01, 0x2BC0, 0x2A80, 0xEA41,
+  0xEE01, 0x2EC0, 0x2F80, 0xEF41, 0x2D00, 0xEDC1, 0xEC81, 0x2C40,
+  0xE401, 0x24C0, 0x2580, 0xE541, 0x2700, 0xE7C1, 0xE681, 0x2640,
+  0x2200, 0xE2C1, 0xE381, 0x2340, 0xE101, 0x21C0, 0x2080, 0xE041,
+  0xA001, 0x60C0, 0x6180, 0xA141, 0x6300, 0xA3C1, 0xA281, 0x6240,
+  0x6600, 0xA6C1, 0xA781, 0x6740, 0xA501, 0x65C0, 0x6480, 0xA441,
+  0x6C00, 0xACC1, 0xAD81, 0x6D40, 0xAF01, 0x6FC0, 0x6E80, 0xAE41,
+  0xAA01, 0x6AC0, 0x6B80, 0xAB41, 0x6900, 0xA9C1, 0xA881, 0x6840,
+  0x7800, 0xB8C1, 0xB981, 0x7940, 0xBB01, 0x7BC0, 0x7A80, 0xBA41,
+  0xBE01, 0x7EC0, 0x7F80, 0xBF41, 0x7D00, 0xBDC1, 0xBC81, 0x7C40,
+  0xB401, 0x74C0, 0x7580, 0xB541, 0x7700, 0xB7C1, 0xB681, 0x7640,
+  0x7200, 0xB2C1, 0xB381, 0x7340, 0xB101, 0x71C0, 0x7080, 0xB041,
+  0x5000, 0x90C1, 0x9181, 0x5140, 0x9301, 0x53C0, 0x5280, 0x9241,
+  0x9601, 0x56C0, 0x5780, 0x9741, 0x5500, 0x95C1, 0x9481, 0x5440,
+  0x9C01, 0x5CC0, 0x5D80, 0x9D41, 0x5F00, 0x9FC1, 0x9E81, 0x5E40,
+  0x5A00, 0x9AC1, 0x9B81, 0x5B40, 0x9901, 0x59C0, 0x5880, 0x9841,
+  0x8801, 0x48C0, 0x4980, 0x8941, 0x4B00, 0x8BC1, 0x8A81, 0x4A40,
+  0x4E00, 0x8EC1, 0x8F81, 0x4F40, 0x8D01, 0x4DC0, 0x4C80, 0x8C41,
+  0x4400, 0x84C1, 0x8581, 0x4540, 0x8701, 0x47C0, 0x4680, 0x8641,
+  0x8201, 0x42C0, 0x4380, 0x8341, 0x4100, 0x81C1, 0x8081, 0x4040
+};
+
+static inline guint16 crc16_byte(guint16 crc, const guint8 data)
+{
+  return (crc >> 8) ^ crc16_table[(crc ^ data) & 0xff];
+}
+
+static guint16
+crcsum(guint16 crc, const guint8* buffer, guint len)
+{
+  while (len--)
+    crc = crc16_byte(crc, *buffer++);
+
+  return crc;
 }
