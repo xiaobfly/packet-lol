@@ -32,6 +32,9 @@ extern gboolean initialized;
 extern guint8 *gPREF_KEY;
 extern guint gPREF_PORT;
 
+extern byte key[16];
+extern gboolean isKey;
+
 /* forward reference */
 void proto_register_lol();
 void proto_reg_handoff_lol();

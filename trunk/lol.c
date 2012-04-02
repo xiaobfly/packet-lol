@@ -2,8 +2,6 @@
 
 struct dbwin_buffer *dbg;
 static base64_decodestate base64;
-static byte key[16];
-static gboolean isKey = FALSE;
 
 /* Listener system */
 static gboolean dbg_stop = FALSE;

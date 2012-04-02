@@ -64,7 +64,7 @@
 				Name="VCLinkerTool"
 				AdditionalDependencies="ws2_32.lib libwsutil.lib libwireshark.lib gmodule-2.0.lib gobject-2.0.lib glib-2.0.lib"
 				OutputFile="bin\lol.dll"
-				LinkIncremental="2"
+				LinkIncremental="1"
 				AdditionalLibraryDirectories="&quot;C:\wireshark-$(PlatformName)-libs\gtk2\lib&quot;;..\..\epan;..\..\wsutil"
 				GenerateDebugInformation="true"
 				SubSystem="2"
