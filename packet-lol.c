@@ -36,6 +36,9 @@ static guint16 crcsum(guint16 crc, const guint8* message, guint length);
 static gboolean haveCrc = FALSE;
 gboolean initialized = FALSE;
 
+byte key[16];
+gboolean isKey = FALSE;
+
 /* Handlers */
 static gint ett_lol = -1;
 static gint ett_enet = -1;
@@ -267,45 +270,141 @@ static guint dissect_enet_commandHeader(tvbuff_t *tvb, packet_info *pinfo, proto
 	proto_tree_add_item(enetCommandHeader, hf_enet_sequenceNumber, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
 	return offset;
 }
-
-static guint dissect_enet_sendReliable(tvbuff_t *tvb, packet_info *pinfo, proto_tree *lolTree, ENetProtocol *command, guint offset)
+static guint dissect_lolPacket(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, guint offset)
 {
-	proto_item *sendReliable = NULL, *packetItem = NULL;
-	guint16 cmd, dataLength;
+	proto_item *lolNode = NULL;
+	proto_tree *lolTree = NULL;
+	proto_item *packetItem = NULL;
+	guint16 dataLength = 0;
+	guint16 encLength = 0;
 	guint length;
-
-	dataLength = ENET_NET_TO_HOST_16(command->sendReliable.dataLength);
+	
 
 	length = tvb_length(tvb);
-	cmd = tvb_get_ntohs(tvb, offset);
-	proto_tree_add_item(lolTree, hf_lol_command, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
-	if(length >= offset+2)
-	{
-		dataLength = tvb_get_ntohs(tvb, offset);
-		proto_tree_add_item(lolTree, hf_lol_length, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
-	}
+	dataLength = tvb_get_ntohs(tvb, offset);
+	encLength = dataLength-(dataLength%8);
 
-	if(length >= offset+dataLength)
-	{
-		packetItem = proto_tree_add_item(lolTree, hf_lol_packet, tvb, offset, dataLength, ENC_NA); offset += dataLength;
-	}
+	/* Create a subnode for this package */
+	lolNode = proto_tree_add_item(enetTree, proto_lol, tvb, offset, 4+dataLength, FALSE);
+	lolTree = proto_item_add_subtree(lolNode, ett_lol);
+
+	/* Format info for the header for this package */
+	proto_tree_add_item(lolTree, hf_lol_length, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
 	
+	if(encLength > 0)
+		if(isKey)
+		{
+
+			int i = 0;
+			BLOWFISH_context c;
+			guchar *decrypted, *packetData;
+			tvbuff_t *new_tvb;
+			
+
+			decrypted = (guchar*)g_malloc(dataLength);
+			packetData = (guchar*)tvb_get_ptr(tvb, offset, dataLength);
+
+			bf_setkey(&c, key, (unsigned)16);
+
+			while(i < encLength)
+			{
+				decrypt_block(&c, (byte*)&decrypted[i], (byte*)&packetData[i]);
+				i+=8;
+			}
+			memcpy(&decrypted[i], &packetData[i], (dataLength%8)); //Copy remained unencrypted bytes
+
+			new_tvb = tvb_new_real_data(decrypted, dataLength, dataLength);
+			tvb_set_child_real_data_tvbuff(tvb, new_tvb);
+			add_new_data_source(pinfo, new_tvb, "Decrypted");
+
+			proto_tree_add_item(lolTree, hf_lol_packet, new_tvb, 0, dataLength, ENC_NA); //Add extra view with decrypted bytes
+		}
+	else
+		if(length >= offset+dataLength)
+			packetItem = proto_tree_add_item(lolTree, hf_lol_packet, tvb, offset, dataLength, ENC_NA);
+
+	offset += dataLength;
+	return offset;
+}
+
+static guint dissect_enet_sendReliable(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, ENetProtocol *command, guint offset)
+{
+	offset = dissect_lolPacket(tvb, pinfo, enetTree, offset);
+	return offset;
+}
+
+static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, unsigned char *enetData, guint offset)
+{
+	ENetProtocol * command;
+	guint length = tvb_length(tvb);
+
+	command = (ENetProtocol *)( enetData+offset);
+	offset = dissect_enet_commandHeader(tvb, pinfo, enetTree, command, offset);
+	switch (command->header.command & ENET_PROTOCOL_COMMAND_MASK)
+	{
+		case ENET_PROTOCOL_COMMAND_ACKNOWLEDGE:
+			col_append_str(pinfo->cinfo, COL_INFO, "Ack, ");
+			break;
+		case ENET_PROTOCOL_COMMAND_CONNECT:
+			col_append_str(pinfo->cinfo, COL_INFO, "Connect, ");
+			break;
+		case ENET_PROTOCOL_COMMAND_VERIFY_CONNECT:
+			col_append_str(pinfo->cinfo, COL_INFO, "Check Connect, ");
+			break;
+		case ENET_PROTOCOL_COMMAND_DISCONNECT:
+			col_append_str(pinfo->cinfo, COL_INFO, "Disconnect, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_PING:
+			col_append_str(pinfo->cinfo, COL_INFO, "Ping, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_SEND_RELIABLE:
+			offset = dissect_enet_sendReliable(tvb, pinfo, enetTree, command, offset);
+			if(length >= offset+sizeof(ENetProtocolCommandHeader))
+				offset = dissect_command(tvb, pinfo, enetTree, enetData, offset);
+			col_append_str(pinfo->cinfo, COL_INFO, "Send reliable, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE:
+			col_append_str(pinfo->cinfo, COL_INFO, "Send unreliable, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_SEND_UNSEQUENCED:
+			col_append_str(pinfo->cinfo, COL_INFO, "Send unsequenced, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_SEND_FRAGMENT:
+			col_append_str(pinfo->cinfo, COL_INFO, "Send fragment, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_BANDWIDTH_LIMIT:
+			col_append_str(pinfo->cinfo, COL_INFO, "Bandwidth limit, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_THROTTLE_CONFIGURE:
+			col_append_str(pinfo->cinfo, COL_INFO, "Throttle configure, ");
+			break;
+
+		case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE_FRAGMENT:
+			col_append_str(pinfo->cinfo, COL_INFO, "Unreliable fragment, ");
+			break;
+		default:
+			col_append_str(pinfo->cinfo, COL_INFO, "Unknown, ");
+	}
 	return offset;
 }
 
 static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 {
 	//Enet
-	ENetPacket *packet;
-	const unsigned char *enetData = NULL;
+	unsigned char *enetData = NULL;
 	ENetProtocolHeader * header;
-	ENetProtocol * command;
-	//ENetPeer * peer;
-	//enet_uint8 * currentData;
+	
 	size_t headerSize;
+	enet_uint32 checksum;
 	enet_uint16 peerID, flags;
 	enet_uint8 sessionID;
-
 	guint offset = 0;
 
 
@@ -315,20 +414,12 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 	
 	if(tree)
 	{
-		proto_item *enetNode = NULL, *lolNode = NULL;
+		proto_item *enetNode = NULL;
 		proto_item *enetHeader = NULL, *item = NULL;
-		proto_tree *enetTree = NULL, *lolTree = NULL;
+		proto_tree *enetTree = NULL;
 		
-		/* Top level header */
 
-		enetNode = proto_tree_add_item(tree, proto_enet, tvb, 0, -1, FALSE);
-		lolNode = proto_tree_add_item(tree, proto_lol, tvb, 0, -1, FALSE);
-		enetTree = proto_item_add_subtree(enetNode, ett_enet);
-		lolTree = proto_item_add_subtree(lolNode, ett_lol);
-		item = proto_tree_add_item(enetTree, hf_enet_header, tvb, 0, 6, FALSE);
-		enetHeader = proto_item_add_subtree(item, ett_enet);
-
-		enetData = tvb_get_ptr(tvb, 0, tvb_length(tvb));
+		enetData = (unsigned char*)tvb_get_ptr(tvb, 0, tvb_length(tvb));
 		header = (ENetProtocolHeader *)enetData;
 		peerID = ENET_NET_TO_HOST_16 (header -> peerID);
 		sessionID = (peerID & ENET_PROTOCOL_HEADER_SESSION_MASK) >> ENET_PROTOCOL_HEADER_SESSION_SHIFT;
@@ -336,70 +427,28 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 		peerID &= ~ (ENET_PROTOCOL_HEADER_FLAG_MASK | ENET_PROTOCOL_HEADER_SESSION_MASK);
 		headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeader) : (size_t) & ((ENetProtocolHeader *) 0) -> sentTime);
 		headerSize += sizeof (enet_uint32); //As LoL using checksum (and i think there checksum is always returning zero...)
+		checksum = ENET_NET_TO_HOST_32(*(enet_uint32 *)&enetData[2]);
+		if(checksum != 0)
+			headerSize += 2;
 
-		if (flags & ENET_PROTOCOL_HEADER_FLAG_COMPRESSED)				//If this happens we not to do a lot of new shit!!
-			col_append_str(pinfo->cinfo, COL_INFO, "COMPRESSED!!!");
+		/* Top level header */
+		enetNode = proto_tree_add_item(tree, proto_enet, tvb, 0, -1, FALSE);
+		enetTree = proto_item_add_subtree(enetNode, ett_enet);
+		item = proto_tree_add_item(enetTree, hf_enet_header, tvb, 0, headerSize, FALSE);
+		enetHeader = proto_item_add_subtree(item, ett_enet);
+
 
 		/* Show all the extracted info in the dissector for enet header */
 		proto_tree_add_uint(enetHeader, hf_enet_peerId, tvb, offset, 2, peerID);
 		proto_tree_add_uint(enetHeader, hf_enet_sessionId, tvb, offset, 2, sessionID);
 		proto_tree_add_uint(enetHeader, hf_enet_flags, tvb, offset, 2, flags); offset += 2;
 		//proto_tree_add_uint(enetHeader, hf_enet_sentTime, tvb, offset, 2, header->sentTime); offset += 2;
+		proto_tree_add_uint(enetHeader, hf_enet_checksum, tvb, offset, 4, checksum);
 		proto_tree_add_item(enetHeader, hf_enet_checksum, tvb, offset, 4, FALSE); offset += 4;
+		if(checksum != 0)
+			 offset += 2;
 
-
-		command = (ENetProtocol *)( enetData+headerSize);
-		offset = dissect_enet_commandHeader(tvb, pinfo, enetTree, command, offset);
-		switch (command->header.command & ENET_PROTOCOL_COMMAND_MASK)
-		{
-			case ENET_PROTOCOL_COMMAND_ACKNOWLEDGE:
-				col_append_str(pinfo->cinfo, COL_INFO, "Ack, ");
-				break;
-			case ENET_PROTOCOL_COMMAND_CONNECT:
-				col_append_str(pinfo->cinfo, COL_INFO, "Connect, ");
-				break;
-			case ENET_PROTOCOL_COMMAND_VERIFY_CONNECT:
-				col_append_str(pinfo->cinfo, COL_INFO, "Check Connect, ");
-				break;
-			case ENET_PROTOCOL_COMMAND_DISCONNECT:
-				col_append_str(pinfo->cinfo, COL_INFO, "Disconnect, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_PING:
-				col_append_str(pinfo->cinfo, COL_INFO, "Ping, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_SEND_RELIABLE:
-				offset = dissect_enet_sendReliable(tvb, pinfo, lolTree, command, offset);
-				col_append_str(pinfo->cinfo, COL_INFO, "Send reliable, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE:
-				col_append_str(pinfo->cinfo, COL_INFO, "Send unreliable, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_SEND_UNSEQUENCED:
-				col_append_str(pinfo->cinfo, COL_INFO, "Send unsequenced, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_SEND_FRAGMENT:
-				col_append_str(pinfo->cinfo, COL_INFO, "Send fragment, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_BANDWIDTH_LIMIT:
-				col_append_str(pinfo->cinfo, COL_INFO, "Bandwidth limit, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_THROTTLE_CONFIGURE:
-				col_append_str(pinfo->cinfo, COL_INFO, "Throttle configure, ");
-				break;
-
-			case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE_FRAGMENT:
-				col_append_str(pinfo->cinfo, COL_INFO, "Unreliable fragment, ");
-				break;
-			default:
-				col_append_str(pinfo->cinfo, COL_INFO, "Unknown, ");
-		}
+		offset = dissect_command(tvb, pinfo, enetTree, enetData, offset);
 
 		/*
 		if(packet_tracking == 0xFF && packet_function == 0xFF)
