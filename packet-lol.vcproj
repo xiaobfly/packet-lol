@@ -62,7 +62,7 @@
 			/>
 			<Tool
 				Name="VCLinkerTool"
-				AdditionalDependencies="libwsutil.lib libwireshark.lib gmodule-2.0.lib gobject-2.0.lib glib-2.0.lib"
+				AdditionalDependencies="ws2_32.lib libwsutil.lib libwireshark.lib gmodule-2.0.lib gobject-2.0.lib glib-2.0.lib"
 				OutputFile="bin\lol.dll"
 				LinkIncremental="2"
 				AdditionalLibraryDirectories="&quot;C:\wireshark-$(PlatformName)-libs\gtk2\lib&quot;;..\..\epan;..\..\wsutil"
@@ -212,6 +212,10 @@
 		<Filter
 			Name="Include"
 			>
+			<File
+				RelativePath=".\crc.cpp"
+				>
+			</File>
 			<Filter
 				Name="Blowfish"
 				>
@@ -239,6 +243,10 @@
 		</Filter>
 		<File
 			RelativePath=".\define.h"
+			>
+		</File>
+		<File
+			RelativePath=".\old.txt"
 			>
 		</File>
 		<File
