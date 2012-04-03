@@ -50,7 +50,6 @@ static dissector_handle_t lol_handle;
 /* Enet */
 static int hf_enet_header = -1;
 static int hf_enet_peerId = -1;
-static int hf_enet_sessionId = -1;
 static int hf_enet_sentTime = -1;
 static int hf_enet_flags = -1;
 static int hf_enet_checksum = -1;
@@ -75,9 +74,9 @@ static int hf_enet_command = -1;
 static int hf_enet_channelId = -1;
 static int hf_enet_sequenceNumber = -1;
 
-static int hf_lol_command = -1;
-static int hf_lol_length = -1;
 static int hf_lol_packet = -1;
+static int hf_lol_length = -1;
+static int hf_lol_command = -1;
 
 /* Global sample preference ("controls" display of numbers) */
 guint8 *gPREF_KEY = NULL;
@@ -102,15 +101,9 @@ void proto_register_lol(void)
 			NULL, 0x0,
 			NULL, HFILL}
 		},
-		{ &hf_enet_sessionId,
-			{"Session ID", "enet.header.sessionid",
-			FT_UINT8, BASE_DEC,
-			NULL, 0x0,
-			NULL, HFILL}
-		},
 		{ &hf_enet_flags,
 		{"Flags", "enet.header.flags",
-			FT_UINT8, BASE_DEC,
+			FT_UINT16, BASE_HEX,
 			NULL, 0x0,
 			NULL, HFILL}
 		},
@@ -153,9 +146,9 @@ void proto_register_lol(void)
 		},
 
 		/* Send structs */
-		{ &hf_lol_command,
-			{"Command", "lol.command",
-			FT_UINT16, BASE_DEC,
+		{ &hf_lol_packet,
+			{"Data", "lol.data",
+			FT_NONE, BASE_NONE,
 			NULL, 0x0,
 			NULL, HFILL}
 		},
@@ -165,12 +158,13 @@ void proto_register_lol(void)
 			NULL, 0x0,
 			NULL, HFILL}
 		},
-		{ &hf_lol_packet,
-			{"Data", "lol.data",
-			FT_NONE, BASE_NONE,
+		{ &hf_lol_command,
+			{"Command", "lol.cmd",
+			FT_UINT8, BASE_HEX,
 			NULL, 0x0,
 			NULL, HFILL}
 		},
+
 	};
 
 	/* Setup protocol subtree array */
@@ -278,8 +272,8 @@ static guint dissect_lolPacket(tvbuff_t *tvb, packet_info *pinfo, proto_tree *en
 	guint16 dataLength = 0;
 	guint16 encLength = 0;
 	guint length;
-	
-
+	tvbuff_t *ftvb;
+	size_t foffset;
 	length = tvb_length(tvb);
 	dataLength = tvb_get_ntohs(tvb, offset);
 	encLength = dataLength-(dataLength%8);
@@ -294,7 +288,6 @@ static guint dissect_lolPacket(tvbuff_t *tvb, packet_info *pinfo, proto_tree *en
 	if(encLength > 0)
 		if(isKey)
 		{
-
 			int i = 0;
 			BLOWFISH_context c;
 			guchar *decrypted, *packetData;
@@ -318,10 +311,20 @@ static guint dissect_lolPacket(tvbuff_t *tvb, packet_info *pinfo, proto_tree *en
 			add_new_data_source(pinfo, new_tvb, "Decrypted");
 
 			proto_tree_add_item(lolTree, hf_lol_packet, new_tvb, 0, dataLength, ENC_NA); //Add extra view with decrypted bytes
+			ftvb = new_tvb;
 		}
+		else
+			ftvb = tvb;
 	else
+	{
+		ftvb = tvb;
 		if(length >= offset+dataLength)
 			packetItem = proto_tree_add_item(lolTree, hf_lol_packet, tvb, offset, dataLength, ENC_NA);
+	}
+
+
+	foffset = (encLength > 0 && isKey) ? 0 : offset;
+	proto_tree_add_item(lolTree, hf_lol_command, ftvb, foffset, 1, ENC_NA); foffset+=1;
 
 	offset += dataLength;
 	return offset;
@@ -332,6 +335,29 @@ static guint dissect_enet_sendReliable(tvbuff_t *tvb, packet_info *pinfo, proto_
 	offset = dissect_lolPacket(tvb, pinfo, enetTree, offset);
 	return offset;
 }
+
+/*
+~First packet recived
+IMxTroll ~Custom game mode
+0000   00 e7 6f 00 00 00 00 00 82 cb 70 01 00 00 00 00  ..o.......p.....
+0010   f8 c6 bd e0 00 90 94 29                          .......)
+
+IMxTroll ~Tutorial
+0000   00 e7 6f 00 00 00 00 00 82 cb 70 01 00 00 00 00  ..o.......p.....
+0010   0c 80 ea 7b b4 ef da 7a                          ...{...z
+
+IMxTroll ~
+0000   00 e7 6f 00 00 00 00 00 82 cb 70 01 00 00        ....o.......p.....
+0010   d4 8b b7 d7 15 44 61 e3                          .....Da.
+
+ColdDoT ~Custom game mode
+0000   00 e7 6f 00 00 00 00 00 71 ae 33 01 00 00 00 00  ..o.....q.3.....
+0010   31 18 58 95 93 23 02 d4                          1.X..#..
+
+ColdDoT ~Custom game mode
+0000   00 e7 6f 00 00 00 00 00 71 ae 33 01 00 00 00 00  ..o.....q.3.....
+0010   18 a6 a7 1e 56 ea 4c e7                          ....V.L.
+*/
 
 static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, unsigned char *enetData, guint offset)
 {
@@ -385,10 +411,6 @@ static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enet
 		case ENET_PROTOCOL_COMMAND_THROTTLE_CONFIGURE:
 			col_append_str(pinfo->cinfo, COL_INFO, "Throttle configure, ");
 			break;
-
-		case ENET_PROTOCOL_COMMAND_SEND_UNRELIABLE_FRAGMENT:
-			col_append_str(pinfo->cinfo, COL_INFO, "Unreliable fragment, ");
-			break;
 		default:
 			col_append_str(pinfo->cinfo, COL_INFO, "Unknown, ");
 	}
@@ -398,15 +420,11 @@ static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enet
 static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 {
 	//Enet
+	size_t headerSize;
 	unsigned char *enetData = NULL;
 	ENetProtocolHeader * header;
-	
-	size_t headerSize;
-	enet_uint32 checksum;
 	enet_uint16 peerID, flags;
-	enet_uint8 sessionID;
 	guint offset = 0;
-
 
 	/* Clear out stuff in the info column */
 	col_set_str(pinfo->cinfo, COL_PROTOCOL, "LoL");
@@ -420,16 +438,12 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 		
 
 		enetData = (unsigned char*)tvb_get_ptr(tvb, 0, tvb_length(tvb));
+
 		header = (ENetProtocolHeader *)enetData;
 		peerID = ENET_NET_TO_HOST_16 (header -> peerID);
-		sessionID = (peerID & ENET_PROTOCOL_HEADER_SESSION_MASK) >> ENET_PROTOCOL_HEADER_SESSION_SHIFT;
 		flags = peerID & ENET_PROTOCOL_HEADER_FLAG_MASK;
-		peerID &= ~ (ENET_PROTOCOL_HEADER_FLAG_MASK | ENET_PROTOCOL_HEADER_SESSION_MASK);
+		peerID &= ~ ENET_PROTOCOL_HEADER_FLAG_MASK;
 		headerSize = (flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME ? sizeof (ENetProtocolHeader) : (size_t) & ((ENetProtocolHeader *) 0) -> sentTime);
-		headerSize += sizeof (enet_uint32); //As LoL using checksum (and i think there checksum is always returning zero...)
-		checksum = ENET_NET_TO_HOST_32(*(enet_uint32 *)&enetData[2]);
-		if(checksum != 0)
-			headerSize += 2;
 
 		/* Top level header */
 		enetNode = proto_tree_add_item(tree, proto_enet, tvb, 0, -1, FALSE);
@@ -437,16 +451,14 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 		item = proto_tree_add_item(enetTree, hf_enet_header, tvb, 0, headerSize, FALSE);
 		enetHeader = proto_item_add_subtree(item, ett_enet);
 
-
 		/* Show all the extracted info in the dissector for enet header */
+		proto_tree_add_item(enetHeader, hf_enet_checksum, tvb, offset, 4, ENC_BIG_ENDIAN); offset += 4;
 		proto_tree_add_uint(enetHeader, hf_enet_peerId, tvb, offset, 2, peerID);
-		proto_tree_add_uint(enetHeader, hf_enet_sessionId, tvb, offset, 2, sessionID);
 		proto_tree_add_uint(enetHeader, hf_enet_flags, tvb, offset, 2, flags); offset += 2;
-		//proto_tree_add_uint(enetHeader, hf_enet_sentTime, tvb, offset, 2, header->sentTime); offset += 2;
-		proto_tree_add_uint(enetHeader, hf_enet_checksum, tvb, offset, 4, checksum);
-		proto_tree_add_item(enetHeader, hf_enet_checksum, tvb, offset, 4, FALSE); offset += 4;
-		if(checksum != 0)
-			 offset += 2;
+		if(flags & ENET_PROTOCOL_HEADER_FLAG_SENT_TIME)
+		{
+			proto_tree_add_item(enetHeader, hf_enet_sentTime, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
+		}
 
 		offset = dissect_command(tvb, pinfo, enetTree, enetData, offset);
 
