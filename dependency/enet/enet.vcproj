@@ -154,10 +154,6 @@
 				>
 			</File>
 			<File
-				RelativePath=".\compress.c"
-				>
-			</File>
-			<File
 				RelativePath=".\host.c"
 				>
 			</File>
