@@ -1,7 +1,7 @@
 #include "lol.h"
 
 struct dbwin_buffer *dbg;
-static base64_decodestate base64;
+base64_decodestate base64;
 
 /* Listener system */
 static gboolean dbg_stop = FALSE;
@@ -38,7 +38,7 @@ void parse_cmd(HANDLE handle)
 	set_single_port(gPREF_PORT);
 
 	//Key decrypting
-	base64_init_decodestate(&base64);
+	//base64_init_decodestate(&base64);
 	base64_decode_block(gPREF_KEY, (int)strlen(gPREF_KEY), key, &base64);
 	isKey = TRUE;
 	OutputDebugStringA(gPREF_KEY);

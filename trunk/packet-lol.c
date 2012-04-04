@@ -36,6 +36,7 @@ static guint16 crcsum(guint16 crc, const guint8* message, guint length);
 static gboolean haveCrc = FALSE;
 gboolean initialized = FALSE;
 
+char *myKey = "BQ/rlw1ivzbg7IG/6/iXRQ==";
 byte key[16];
 gboolean isKey = FALSE;
 
@@ -47,6 +48,8 @@ static int proto_enet = -1;
 static dissector_handle_t lol_handle;
 
 /* Structure */
+static GHashTable *fragmentTable = NULL;
+static GHashTable *reassembledTable = NULL;
 /* Enet */
 static int hf_enet_header = -1;
 static int hf_enet_peerId = -1;
@@ -74,6 +77,14 @@ static int hf_enet_command = -1;
 static int hf_enet_channelId = -1;
 static int hf_enet_sequenceNumber = -1;
 
+static int hf_enet_startSequence = -1;
+static int hf_enet_dataLength = -1;
+static int hf_enet_fragmentCount = -1;
+static int hf_enet_fragmentNo = -1;
+static int hf_enet_totalLength = -1;
+static int hf_enet_fragmentOffset = -1;
+
+
 static int hf_lol_packet = -1;
 static int hf_lol_length = -1;
 static int hf_lol_command = -1;
@@ -82,7 +93,41 @@ static int hf_lol_command = -1;
 guint8 *gPREF_KEY = NULL;
 guint gPREF_PORT = 5000;
 
-#define LOL_ACK_FLAG 0x01
+
+static int hf_msg_fragments = -1;
+static int hf_msg_fragment = -1;
+static int hf_msg_fragment_overlap = -1;
+static int hf_msg_fragment_overlap_conflicts = -1;
+static int hf_msg_fragment_multiple_tails = -1;
+static int hf_msg_fragment_too_long_fragment = -1;
+static int hf_msg_fragment_error = -1;
+static int hf_msg_fragment_count = -1;
+static int hf_msg_reassembled_in = -1;
+static int hf_msg_reassembled_length = -1;
+static gint ett_msg_fragment = -1;
+static gint ett_msg_fragments = -1;
+
+static const fragment_items msg_frag_items = {
+	/* Fragment subtrees */
+	&ett_msg_fragment,
+	&ett_msg_fragments,
+	/* Fragment fields */
+	&hf_msg_fragments,
+	&hf_msg_fragment,
+	&hf_msg_fragment_overlap,
+	&hf_msg_fragment_overlap_conflicts,
+	&hf_msg_fragment_multiple_tails,
+	&hf_msg_fragment_too_long_fragment,
+	&hf_msg_fragment_error,
+	&hf_msg_fragment_count,
+	/* Reassembled in field */
+	&hf_msg_reassembled_in,
+	/* Reassembled length field */
+	&hf_msg_reassembled_length,
+	/* Tag */
+	"Message fragments"
+};
+
 void proto_register_lol(void)
 {
 	module_t *lol_module;
@@ -144,6 +189,42 @@ void proto_register_lol(void)
 			NULL, 0x0,
 			NULL, HFILL}
 		},
+		{ &hf_enet_startSequence,
+		{"Start sequence", "enet.cheader.startseq",
+			FT_UINT16, BASE_DEC,
+			NULL, 0x0,
+			NULL, HFILL}
+		},
+		{ &hf_enet_dataLength,
+		{"Data length", "enet.cheader.datalen",
+			FT_UINT16, BASE_DEC,
+			NULL, 0x0,
+			NULL, HFILL}
+		},
+		{ &hf_enet_fragmentCount,
+		{"Fragment count", "enet.cheader.frag.count",
+			FT_UINT32, BASE_DEC,
+			NULL, 0x0,
+			NULL, HFILL}
+		},
+		{ &hf_enet_fragmentNo,
+			{"Fragment number", "enet.cheader.frag.no",
+			FT_UINT32, BASE_DEC,
+			NULL, 0x0,
+			NULL, HFILL}
+		},
+		{ &hf_enet_totalLength,
+			{"Total length", "enet.cheader.frag.length",
+			FT_UINT32, BASE_DEC,
+			NULL, 0x0,
+			NULL, HFILL}
+		},
+		{ &hf_enet_fragmentOffset,
+			{"Fragment offset", "enet.cheader.frag.offset",
+			FT_UINT32, BASE_DEC,
+			NULL, 0x0,
+			NULL, HFILL}
+		},
 
 		/* Send structs */
 		{ &hf_lol_packet,
@@ -165,12 +246,47 @@ void proto_register_lol(void)
 			NULL, HFILL}
 		},
 
+		/* Fragments */
+		{&hf_msg_fragments,
+		{"Message fragments", "msg.fragments",
+		FT_NONE, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment,
+		{"Message fragment", "msg.fragment",
+		FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment_overlap,
+		{"Message fragment overlap", "msg.fragment.overlap",
+		FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment_overlap_conflicts,
+		{"Message fragment overlapping with conflicting data",
+		"msg.fragment.overlap.conflicts",
+		FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment_multiple_tails,
+		{"Message has multiple tail fragments",
+		"msg.fragment.multiple_tails",
+		FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment_too_long_fragment,
+		{"Message fragment too long", "msg.fragment.too_long_fragment",
+		FT_BOOLEAN, 0, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment_error,
+		{"Message defragmentation error", "msg.fragment.error",
+		FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_fragment_count,
+		{"Message fragment count", "msg.fragment.count",
+		FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_reassembled_in,
+		{"Reassembled in", "msg.reassembled.in",
+		FT_FRAMENUM, BASE_NONE, NULL, 0x00, NULL, HFILL } },
+		{&hf_msg_reassembled_length,
+		{"Reassembled length", "msg.reassembled.length",
+		FT_UINT32, BASE_DEC, NULL, 0x00, NULL, HFILL } },
 	};
 
 	/* Setup protocol subtree array */
 	static gint *ett[] = {
 		&ett_enet,
-		&ett_lol
+		&ett_lol,
+		&ett_msg_fragment,
+		&ett_msg_fragments
 	};
 
 	proto_enet = proto_register_protocol(
@@ -185,6 +301,9 @@ void proto_register_lol(void)
 		"lol"								/* abbrev */
 	);
 	
+	fragment_table_init(&fragmentTable);
+	reassembled_table_init(&reassembledTable);
+
 	proto_register_field_array(proto_enet, hf_enet, array_length(hf_enet));
 	proto_register_subtree_array(ett, array_length(ett));
 	
@@ -229,6 +348,14 @@ void proto_reg_handoff_lol(void)
 	if(!initialized)
 	{
 		lol_handle = create_dissector_handle(dissect_lol, proto_lol);
+
+		//Set defaults
+		OutputDebugStringA("Settings defaults");
+		base64_init_decodestate(&base64);
+		base64_decode_block(myKey, (int)strlen(myKey), key, &base64);
+		isKey = TRUE;
+		OutputDebugStringA(myKey);
+
 		initialized = TRUE;
 	}
 	
@@ -236,128 +363,168 @@ void proto_reg_handoff_lol(void)
 		dissector_add_uint("udp.port", i, lol_handle);
 }
 
-//  GSList      *pfd;         /**< Per frame proto data */
-//  guint32      num;         /**< Frame number */
-//  guint32      pkt_len;     /**< Packet length */
-//  guint32      cap_len;     /**< Amount actually captured */
-//  guint32      cum_bytes;   /**< Cumulative bytes into the capture */
-//  gint64       file_off;    /**< File offset */
-//  guint16      subnum;      /**< subframe number, for protocols that require this */
-//  gint16       lnk_t;       /**< Per-packet encapsulation/data-link type */
-//  struct {
-    //unsigned int passed_dfilter : 1; /**< 1 = display, 0 = no display */
-    //unsigned int encoding       : 2; /**< Character encoding (ASCII, EBCDIC...) */
-    //unsigned int visited        : 1; /**< Has this packet been visited yet? 1=Yes,0=No*/
-    //unsigned int marked         : 1; /**< 1 = marked by user, 0 = normal */
-    //unsigned int ref_time       : 1; /**< 1 = marked as a reference time frame, 0 = normal */
-    //unsigned int ignored        : 1; /**< 1 = ignore this frame, 0 = normal */
-  //} flags;
-static guint dissect_enet_commandHeader(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, ENetProtocol *command, guint offset)
+static tvbuff_t *getDecryptedTvb(packet_info *pinfo, tvbuff_t *tvb, guint tvbOffset, guint length)
 {
-	proto_item *enetCommandHeader = NULL, *item = NULL;
+	guint i = 0, encryptedLength = 0;
+	BLOWFISH_context c;
+	guchar *decrypted, *packetData;
+	tvbuff_t *new_tvb;
+	char buf[255];
 
-	item = proto_tree_add_item(enetTree, hf_enet_commandHeader, tvb, offset, 4, FALSE);
-	enetCommandHeader = proto_item_add_subtree(item, ett_enet);
-
-	proto_tree_add_item(enetCommandHeader, hf_enet_command, tvb, offset, 1, ENC_NA); offset += 1;
-	proto_tree_add_item(enetCommandHeader, hf_enet_channelId, tvb, offset, 1, ENC_NA); offset += 1;
-	proto_tree_add_item(enetCommandHeader, hf_enet_sequenceNumber, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
-	return offset;
-}
-static guint dissect_lolPacket(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, guint offset)
-{
-	proto_item *lolNode = NULL;
-	proto_tree *lolTree = NULL;
-	proto_item *packetItem = NULL;
-	guint16 dataLength = 0;
-	guint16 encLength = 0;
-	guint length;
-	tvbuff_t *ftvb;
-	size_t foffset;
-	length = tvb_length(tvb);
-	dataLength = tvb_get_ntohs(tvb, offset);
-	encLength = dataLength-(dataLength%8);
-
-	/* Create a subnode for this package */
-	lolNode = proto_tree_add_item(enetTree, proto_lol, tvb, offset, 4+dataLength, FALSE);
-	lolTree = proto_item_add_subtree(lolNode, ett_lol);
-
-	/* Format info for the header for this package */
-	proto_tree_add_item(lolTree, hf_lol_length, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
+	encryptedLength = length-(length%8); //Decrypt 8 byte blocks
 	
-	if(encLength > 0)
-		if(isKey)
-		{
-			int i = 0;
-			BLOWFISH_context c;
-			guchar *decrypted, *packetData;
-			tvbuff_t *new_tvb;
-			
+	decrypted = (guchar*)g_malloc(length);
+	packetData = (guchar*)tvb_get_ptr(tvb, tvbOffset, length);
 
-			decrypted = (guchar*)g_malloc(dataLength);
-			packetData = (guchar*)tvb_get_ptr(tvb, offset, dataLength);
+	bf_setkey(&c, key, (unsigned)16);
 
-			bf_setkey(&c, key, (unsigned)16);
+	while(i < encryptedLength)
+	{
+		sprintf_s(buf, 255, "Decrypt block, startOffset: %i, encOffset: %i, length: %i, encLength: %i", tvbOffset, i, length, encryptedLength);
+		//OutputDebugString(buf);
+		decrypt_block(&c, (byte*)&decrypted[i], (byte*)&packetData[i]);
+		i+=8;
+	}
+	memcpy(&decrypted[i], &packetData[i], (length%8)); //Copy remained unencrypted bytes
 
-			while(i < encLength)
-			{
-				decrypt_block(&c, (byte*)&decrypted[i], (byte*)&packetData[i]);
-				i+=8;
-			}
-			memcpy(&decrypted[i], &packetData[i], (dataLength%8)); //Copy remained unencrypted bytes
+	new_tvb = tvb_new_real_data(decrypted, length, length);
+	tvb_set_child_real_data_tvbuff(tvb, new_tvb);
+	add_new_data_source(pinfo, new_tvb, "Decrypted");
+	return new_tvb;
+}
 
-			new_tvb = tvb_new_real_data(decrypted, dataLength, dataLength);
-			tvb_set_child_real_data_tvbuff(tvb, new_tvb);
-			add_new_data_source(pinfo, new_tvb, "Decrypted");
-
-			proto_tree_add_item(lolTree, hf_lol_packet, new_tvb, 0, dataLength, ENC_NA); //Add extra view with decrypted bytes
-			ftvb = new_tvb;
-		}
+static guint dissect_lolPacket(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, guint dataLength, guint offset)
+{
+	proto_tree *lolTree = NULL;
+	proto_item *lolNode = NULL, *packetItem = NULL;
+	tvbuff_t *newTvb = NULL;
+	guint newOffset;
+	guint16 encLength = dataLength-(dataLength%8);
+	
+	/* Create a sub node for this package */
+	lolNode = proto_tree_add_item(enetTree, proto_lol, tvb, offset, dataLength, FALSE);
+	lolTree = proto_item_add_subtree(lolNode, ett_lol);
+	
+	if(dataLength >= 8)
+	{
+		newTvb = getDecryptedTvb(pinfo, tvb, offset, dataLength);
+		if(newTvb != NULL)
+			newOffset = 0;
 		else
-			ftvb = tvb;
+			goto normal;
+	}	
 	else
 	{
-		ftvb = tvb;
-		if(length >= offset+dataLength)
-			packetItem = proto_tree_add_item(lolTree, hf_lol_packet, tvb, offset, dataLength, ENC_NA);
+		normal:
+		newOffset = offset;
+		newTvb = tvb;
 	}
 
-
-	foffset = (encLength > 0 && isKey) ? 0 : offset;
-	proto_tree_add_item(lolTree, hf_lol_command, ftvb, foffset, 1, ENC_NA); foffset+=1;
+	proto_tree_add_item(lolTree, hf_lol_command, newTvb, newOffset, 1, ENC_NA); newOffset+= 1;
+	packetItem = proto_tree_add_item(lolTree, hf_lol_packet, newTvb, newOffset, dataLength-1, ENC_NA); newOffset+= dataLength-1;
 
 	offset += dataLength;
 	return offset;
 }
 
-static guint dissect_enet_sendReliable(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, ENetProtocol *command, guint offset)
+static guint dissect_enet_dissectCommandHeader(tvbuff_t *tvb, proto_item **subNode, proto_tree *enetTree, ENetProtocol *command, guint offset)
 {
-	offset = dissect_lolPacket(tvb, pinfo, enetTree, offset);
+	proto_item *item = NULL, *commandHeader = NULL;
+	item = proto_tree_add_item(enetTree, hf_enet_commandHeader, tvb, offset, 4, FALSE);
+	commandHeader = proto_item_add_subtree(item, ett_enet);
+	*subNode = commandHeader;
+
+	proto_tree_add_item(commandHeader, hf_enet_command, tvb, offset, 1, ENC_NA); offset += 1;
+	proto_tree_add_item(commandHeader, hf_enet_channelId, tvb, offset, 1, ENC_NA); offset += 1;
+	proto_tree_add_item(commandHeader, hf_enet_sequenceNumber, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
+
 	return offset;
 }
 
-/*
-~First packet recived
-IMxTroll ~Custom game mode
-0000   00 e7 6f 00 00 00 00 00 82 cb 70 01 00 00 00 00  ..o.......p.....
-0010   f8 c6 bd e0 00 90 94 29                          .......)
+static guint dissect_enet_sendReliable(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, ENetProtocol *command, guint offset)
+{
+	proto_item *enetCommandHeader = NULL;
+	guint dataLength = 0;
 
-IMxTroll ~Tutorial
-0000   00 e7 6f 00 00 00 00 00 82 cb 70 01 00 00 00 00  ..o.......p.....
-0010   0c 80 ea 7b b4 ef da 7a                          ...{...z
+	offset = dissect_enet_dissectCommandHeader(tvb, &enetCommandHeader, enetTree, command, offset);
+	
+	dataLength = (guint16)tvb_get_ntohs(tvb, offset);
+	proto_tree_add_item(enetCommandHeader, hf_enet_dataLength, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
+	
+	offset = dissect_lolPacket(tvb, pinfo, enetTree, dataLength, offset);
+	return offset;
+}
 
-IMxTroll ~
-0000   00 e7 6f 00 00 00 00 00 82 cb 70 01 00 00        ....o.......p.....
-0010   d4 8b b7 d7 15 44 61 e3                          .....Da.
 
-ColdDoT ~Custom game mode
-0000   00 e7 6f 00 00 00 00 00 71 ae 33 01 00 00 00 00  ..o.....q.3.....
-0010   31 18 58 95 93 23 02 d4                          1.X..#..
 
-ColdDoT ~Custom game mode
-0000   00 e7 6f 00 00 00 00 00 71 ae 33 01 00 00 00 00  ..o.....q.3.....
-0010   18 a6 a7 1e 56 ea 4c e7                          ....V.L.
-*/
+static guint dissect_enet_sendFragment(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, ENetProtocol *command, guint offset)
+{
+	fragment_data *frag;
+	gboolean state = pinfo->fragmented;
+	proto_item *enetCommandHeader = NULL;
+	fragment_data *fragMsg = NULL;
+	tvbuff_t* new_tvb = NULL;
+	guint dataLength, sequenceId, fragCount, fragNo, totalLength;
+	gboolean lastFragment;
+	char buf[255];
+	offset = dissect_enet_dissectCommandHeader(tvb, &enetCommandHeader, enetTree, command, offset);
+
+	sequenceId = tvb_get_ntohs(tvb, offset);
+	dataLength = tvb_get_ntohs(tvb, offset+2);
+	fragCount = tvb_get_ntohl(tvb, offset+4)-1;
+	fragNo = tvb_get_ntohl(tvb, offset+8);
+	totalLength = tvb_get_ntohl(tvb, offset+12);
+	lastFragment = (fragNo == fragCount);
+
+	
+	proto_tree_add_item(enetCommandHeader, hf_enet_startSequence, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
+	proto_tree_add_item(enetCommandHeader, hf_enet_dataLength, tvb, offset, 2, ENC_BIG_ENDIAN); offset += 2;
+	proto_tree_add_item(enetCommandHeader, hf_enet_fragmentCount, tvb, offset, 4, ENC_BIG_ENDIAN); offset += 4;
+	proto_tree_add_item(enetCommandHeader, hf_enet_fragmentNo, tvb, offset, 4, ENC_BIG_ENDIAN); offset += 4;
+	proto_tree_add_item(enetCommandHeader, hf_enet_totalLength, tvb, offset, 4, ENC_BIG_ENDIAN); offset += 4;
+	proto_tree_add_item(enetCommandHeader, hf_enet_fragmentOffset, tvb, offset, 4, ENC_BIG_ENDIAN); offset += 4;
+
+	proto_tree_add_item(enetCommandHeader, hf_lol_packet, tvb, offset, dataLength, ENC_NA);
+
+	sprintf_s(buf, 255, "Fragment(%i), length: %i(%i), seqId: %i, fragCount: %i, fragNo: %i, totalLength: %i, isLast: %i", pinfo->fragmented, dataLength,  tvb_length_remaining(tvb, offset), sequenceId, fragCount, fragNo, totalLength, lastFragment);
+	OutputDebugString(buf);
+	pinfo->fragmented = TRUE;
+	printf("SO ... FUCKED UP");
+	fragMsg = fragment_add_seq_check(tvb, offset, pinfo, sequenceId, fragmentTable, reassembledTable, fragNo,  tvb_length_remaining(tvb, offset), !lastFragment);
+	frag = fragment_get(pinfo, sequenceId, fragmentTable);
+	sprintf_s(buf, 255, "FragMsg: %X, len: %i", frag, fragment_get_tot_len(pinfo, sequenceId, fragmentTable));
+	printf("SO ... FUCKED UP");
+	OutputDebugString(buf);
+
+	if(!lastFragment)
+	{
+		col_append_str(pinfo->cinfo, COL_INFO," (fragments)");
+	}
+	else
+	{
+		OutputDebugString("LAST FRAGMENT BICH!!");
+		col_append_str(pinfo->cinfo, COL_INFO," (Last fragment)");
+	}
+	new_tvb = process_reassembled_data(tvb, offset, pinfo, "Reassembled Message", fragMsg, &msg_frag_items, NULL, enetTree);
+
+	if (fragMsg) { /* Reassembled */
+		col_append_str(pinfo->cinfo, COL_INFO,
+			" (Message Reassembled)");
+	} else { /* Not last packet of reassembled Short Message */
+		col_append_fstr(pinfo->cinfo, COL_INFO,
+			" (Message fragment %u)", fragNo);
+	}
+
+	if (new_tvb) { /* take it all */
+		//next_tvb = new_tvb;
+	} else { /* make a new subset */
+		//next_tvb = tvb_new_subset(tvb, offset, -1, -1);
+	}
+
+	pinfo->fragmented = state;
+	offset = dissect_lolPacket(tvb, pinfo, enetTree, dataLength, offset);
+	return offset;
+}
 
 static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enetTree, unsigned char *enetData, guint offset)
 {
@@ -365,7 +532,6 @@ static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enet
 	guint length = tvb_length(tvb);
 
 	command = (ENetProtocol *)( enetData+offset);
-	offset = dissect_enet_commandHeader(tvb, pinfo, enetTree, command, offset);
 	switch (command->header.command & ENET_PROTOCOL_COMMAND_MASK)
 	{
 		case ENET_PROTOCOL_COMMAND_ACKNOWLEDGE:
@@ -401,6 +567,8 @@ static guint dissect_command(tvbuff_t *tvb, packet_info *pinfo, proto_tree *enet
 			break;
 
 		case ENET_PROTOCOL_COMMAND_SEND_FRAGMENT:
+			pinfo->fragmented = TRUE;
+			offset = dissect_enet_sendFragment(tvb, pinfo, enetTree, command, offset);
 			col_append_str(pinfo->cinfo, COL_INFO, "Send fragment, ");
 			break;
 
@@ -461,167 +629,6 @@ static void dissect_lol(tvbuff_t *tvb, packet_info *pinfo, proto_tree *tree)
 		}
 
 		offset = dissect_command(tvb, pinfo, enetTree, enetData, offset);
-
-		/*
-		if(packet_tracking == 0xFF && packet_function == 0xFF)
-		{
-			col_append_str(pinfo->cinfo, COL_INFO, "Connection request");
-			proto_tree_add_item(lol_tree, hf_lol_data, tvb, offset, -1, FALSE);
-			save_key(tvb);
-		}				
-		else
-		{
-			gint length = (gint)tvb_length(tvb);
-			/* Read all packets *
-			while(offset < length)
-			{
-				guint8 packet_type = tvb_get_guint8(tvb, offset);
-				guint8 packet_class = tvb_get_guint8(tvb, offset+1);
-								
-				guint16 header_length = 4;
-				guint16 data_length = 0;
-				if((offset+header_length) < length)
-					data_length = (guint16)tvb_get_ntohs(tvb, offset+header_length);
-				
-				//ACK Lenght fixes
-				if(packet_type == 0x01)
-					data_length = -header_length-3;
-				
-				switch(packet_type)
-				{
-					case 0x01:
-						col_append_str(pinfo->cinfo, COL_INFO, "Ack, ");
-					break;
-					case 0x82:
-					case 0x83:
-						switch(packet_class)
-						{
-							case 0xFF:
-								col_append_str(pinfo->cinfo, COL_INFO, "Connect, ");
-							break;
-						}
-					break;
-					
-					case 0x86:
-						switch(packet_class)
-						{
-							case 0x00:
-								col_append_str(pinfo->cinfo, COL_INFO, "KeyCheck, ");
-								if(haveCrc == FALSE)
-								{
-									checksum = crcsum(0, tvb_get_ptr(tvb, 0, tvb_length(tvb)), tvb_length(tvb));
-
-									p = (char*)g_malloc(255);
-									sprintf_s(p, 255, "CRC: %i, (lenght: %i)", checksum, tvb_length(tvb));
-									col_append_str(pinfo->cinfo, COL_INFO, p);
-									OutputDebugString(p);
-									g_free(p);
-									haveCrc = TRUE;
-								}
-							break;
-							case 0x05:
-								col_append_str(pinfo->cinfo, COL_INFO, "Chat, ");
-							break;
-						}
-				}
-				
-				/* Packet subtree header *
-				/* TODO: Numbering *
-				lol_header_item = proto_tree_add_item(lol_tree, hf_lol_packet, tvb, offset, header_length+data_length+2, FALSE);
-				lol_header_tree = proto_item_add_subtree(lol_header_item, ett_lol);
-				
-				/* Packet header structure building *
-				proto_tree_add_item(lol_header_tree, hf_lol_type, tvb, offset, 1, FALSE); offset += 1;
-				proto_tree_add_item(lol_header_tree, hf_lol_class, tvb, offset, 1, FALSE); offset += 1;
-					
-				if(packet_type == 0x07 || packet_type == 0x49)
-				{
-					proto_tree_add_item(lol_header_tree, hf_lol_unknown16, tvb, offset, 2, FALSE); offset += 2; //unk, these two packets randomly have two extra bytes that are always 00
-					data_length = (guint16)tvb_get_ntohs(tvb, offset+2);
-				}
-				
-				if(packet_type== 0x83 && packet_class == 0xFF)
-				{
-					proto_tree_add_item(lol_header_tree, hf_lol_data, tvb, offset, -1, FALSE);
-					break;
-				}
-				else if(packet_type == 0x01)
-				{
-					proto_tree_add_item(lol_header_tree, hf_lol_unknown16, tvb, offset, 2, FALSE); offset += 2;
-					proto_tree_add_item(lol_header_tree, hf_lol_ack, tvb, offset, 2, FALSE); offset += 2;
-					proto_tree_add_item(lol_header_tree, hf_lol_acking, tvb, offset, 2, FALSE); offset += 2;
-				}
-				else
-				{
-					proto_tree_add_item(lol_header_tree, hf_lol_ack, tvb, offset, 2, FALSE); offset += 2;
-					
-					if(offset < length)//Lenght check
-					{
-						proto_tree_add_item(lol_header_tree, hf_lol_length, tvb, offset, 2, FALSE); offset += 2;
-						
-						if(packet_type== 0x88 && packet_class == 0x03) //Multipacket
-						{/*
-							if(isKey)
-							{
-							int i = 0;
-							BLOWFISH_context c;					
-							guint16 enc_length;*
-							
-							data_length = (guint16)tvb_get_ntohs(tvb, offset);
-							proto_tree_add_item(lol_header_tree, hf_lol_segment_size, tvb, offset, 2, FALSE); offset += 4;
-							proto_tree_add_item(lol_header_tree, hf_lol_total_packets, tvb, offset, 2, FALSE); offset += 4;
-							proto_tree_add_item(lol_header_tree, hf_lol_sequence, tvb, offset, 2, FALSE); offset += 4;
-							proto_tree_add_item(lol_header_tree, hf_lol_total_size, tvb, offset, 2, FALSE); offset += 4;
-							proto_tree_add_item(lol_header_tree, hf_lol_previous_size, tvb, offset, 2, FALSE); offset += 2;
-							/*
-							enc_length = data_length-(data_length%8);
-							bf_setkey(&c, key, (unsigned)16);
-							while(i < enc_length)
-							{
-								decrypt_block(&c, (byte*)tvb_get_ptr(tvb, offset+i, 8), (byte*)tvb_get_ptr(tvb, offset+i, 8));
-								i+=8;
-							}*/
-							
-							/* The real data *
-							proto_tree_add_item(lol_header_tree, hf_lol_data, tvb, offset, data_length, FALSE); offset += data_length;
-							//}
-						}
-						else
-						{
-						
-							if(isKey)
-							{
-							
-							int i = 0;
-							BLOWFISH_context c;
-							guchar *decrypted;
-							tvbuff_t *new_tvb;
-							guint16 enc_length = data_length-(data_length%8);
-							
-							decrypted = (guchar*)g_malloc(enc_length);
-							bf_setkey(&c, key, (unsigned)16);
-							
-							
-							while(i < enc_length)
-							{
-								decrypt_block(&c, (byte*)&decrypted[offset+i], (byte*)tvb_get_ptr(tvb, offset+i, 8));
-								i+=8;
-							}
-							memcpy(&decrypted[offset+i], tvb_get_ptr(tvb, offset+i, 8), (data_length%8));
-						
-							new_tvb = tvb_new_real_data(decrypted, enc_length, enc_length);
-							tvb_set_child_real_data_tvbuff(tvb, new_tvb);
-							col_append_str(pinfo->cinfo, COL_INFO, "Decrypted, ");
-							add_new_data_source(pinfo, new_tvb, "Decrypted");
-		
-							proto_tree_add_item(lol_header_tree, hf_lol_data, new_tvb, offset, data_length, FALSE); offset += data_length;
-							}
-							//proto_tree_add_item(lol_header_tree, hf_lol_data, tvb, offset, data_length, FALSE); offset += data_length;
-						}
-					}
-				}
-			}
-		}*/
 	}
 }
 

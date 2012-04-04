@@ -17,6 +17,7 @@
 #include <epan/packet.h>
 #include <epan/prefs.h>
 #include <epan/frame_data.h>
+#include <epan/reassemble.h>
 
 #define LOL_PORT_MIN 5000
 #define LOL_PORT_MAX 5500
@@ -31,7 +32,7 @@
 extern gboolean initialized;
 extern guint8 *gPREF_KEY;
 extern guint gPREF_PORT;
-
+extern base64_decodestate base64;
 extern byte key[16];
 extern gboolean isKey;
 
